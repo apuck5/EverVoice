@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EverVoice — AI Voice Memories</title>
+  <style>
+    :root{--accent:#2575fc;--accent-2:#6a11cb;--cta:#ff5a5f}
+    *{box-sizing:border-box}
+    body{font-family:Arial, sans-serif;margin:0;color:#222;background:#f7f9fc;line-height:1.5}
+    .container{max-width:1000px;margin:0 auto;padding:20px}
+    .site-header{background:linear-gradient(135deg,var(--accent-2),var(--accent));color:#fff;padding:24px 0;text-align:center}
+    .site-header nav a{color:#fff;margin:0 10px;text-decoration:none}
+    .hero{padding:40px 0;text-align:center}
+    .hero h2{font-size:2rem;margin:0 0 10px}
+    .cta{background:var(--cta);color:#fff;padding:12px 18px;border-radius:8px;text-decoration:none}
+    .features{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px;margin:30px 0}
+    .feature{background:#fff;padding:18px;border-radius:10px;box-shadow:0 6px 18px rgba(20,30,60,0.06)}
+    .pricing{margin:30px 0;text-align:center}
+    .plan-grid{display:flex;flex-wrap:wrap;gap:16px;justify-content:center}
+    .plan-card{background:#fff;padding:16px;border-radius:10px;border:1px solid rgba(37,117,252,0.12);min-width:200px;text-align:center}
+    footer{background:#111;color:#fff;padding:18px 0;margin-top:40px;text-align:center}
+    input,textarea{width:100%;padding:10px;margin:6px 0 12px;border-radius:6px;border:1px solid #ddd}
+    label{font-weight:600}
+    .status{margin-top:12px;color:var(--accent)}
+    .recorder{margin:10px 0;text-align:center}
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <div class="container">
+      <h1>EverVoice</h1>
+      <p>AI voice memories for families — create, preserve, and share personalized voice messages.</p>
+      <nav>
+        <a href="#plans">Plans</a>
+        <a href="#create">Create Voice</a>
+        <a href="#privacy">Privacy</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="hero">
+      <h2>Keep their voice close, forever.</h2>
+      <p>Upload recordings, confirm consent, and generate personalized messages using secure AI voice models.</p>
+      <p><a class="cta" href="#create">Start a Free Demo</a></p>
+    </section>
+
+    <section class="features">
+      <div class="feature">
+        <h3>Easy Uploads</h3>
+        <p>Record or upload audio files from your phone or computer.</p>
+      </div>
+      <div class="feature">
+        <h3>Consent-First</h3>
+        <p>Explicit consent is required before any voice model is created.</p>
+      </div>
+      <div class="feature">
+        <h3>Secure Storage</h3>
+        <p>Encrypted storage with full deletion options — you control the voice legacy.</p>
+      </div>
+    </section>
+
+    <section id="plans" class="pricing">
+      <h3>Plans</h3>
+      <div class="plan-grid">
+        <div class="plan-card">
+          <h4>Free Demo</h4>
+          <p>One 30s sample generated</p>
+          <p><strong>$0</strong></p>
+        </div>
+        <div class="plan-card">
+          <h4>Basic</h4>
+          <p>20 messages / month</p>
+          <p><strong>$9.99 / mo</strong></p>
+          <a class="cta" href="https://buy.stripe.com/your-basic-link">Subscribe</a>
+        </div>
+        <div class="plan-card">
+          <h4>Family</h4>
+          <p>Unlimited messages + storage</p>
+          <p><strong>$19.99 / mo</strong></p>
+          <a class="cta" href="https://buy.stripe.com/your-family-link">Subscribe</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="create">
+      <h2>Create a Voice Model — Consent Required</h2>
+      <form id="uploadForm" onsubmit="return handleSubmit(event)">
+        <label for="name">Name of person:</label>
+        <input id="name" name="name" required>
+
+        <label for="consent">Consent statement:</label>
+        <textarea id="consent" name="consent" rows="3" required placeholder="I, [Full Name], consent..."></textarea>
+
+        <label for="file">Upload audio sample:</label>
+        <input id="file" name="file" type="file" accept="audio/*" required>
+
+        <div class="recorder">
+          <p>Or record directly:</p>
+          <button type="button" id="recordBtn">Start Recording</button>
+          <button type="button" id="stopBtn" disabled>Stop</button>
+          <audio id="player" controls></audio>
+        </div>
+
+        <label><input type="checkbox" id="agree" required> I confirm explicit consent is given.</label>
+
+        <button class="cta" type="submit">Submit</button>
+        <p id="status" class="status"></p>
+      </form>
+    </section>
+
+    <section id="privacy">
+      <h3>Privacy & Terms</h3>
+      <p>We only process voice data when explicit consent is provided. You can request deletion at any time by contacting <a href="mailto:support@evervoice.com">support@evervoice.com</a>.</p>
+    </section>
+  </main>
+
+  <footer>
+    <p>© 2025 EverVoice</p>
+  </footer>
+
+  <script>
+    let mediaRecorder;let recordedChunks=[];
+    const recordBtn=document.getElementById('recordBtn');
+    const stopBtn=document.getElementById('stopBtn');
+    const player=document.getElementById('player');
+    const statusEl=document.getElementById('status');
+
+    if(recordBtn){
+      recordBtn.addEventListener('click',async()=>{
+        recordedChunks=[];
+        try{
+          const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+          mediaRecorder=new MediaRecorder(stream);
+          mediaRecorder.ondataavailable=e=>{if(e.data.size>0)recordedChunks.push(e.data)};
+          mediaRecorder.onstop=()=>{
+            const blob=new Blob(recordedChunks,{type:'audio/webm'});
+            player.src=URL.createObjectURL(blob);
+            player.controls=true;
+            statusEl.textContent='Recording ready (not uploaded).';
+          };
+          mediaRecorder.start();
+          recordBtn.disabled=true;stopBtn.disabled=false;
+          statusEl.textContent='Recording...';
+        }catch(err){alert('Microphone access denied or unavailable.');}
+      });
+    }
+    if(stopBtn){
+      stopBtn.addEventListener('click',()=>{
+        if(mediaRecorder&&mediaRecorder.state!=='inactive'){
+          mediaRecorder.stop();
+          recordBtn.disabled=false;stopBtn.disabled=true;
+          statusEl.textContent='Processing recording...';
+        }
+      });
+    }
+    function handleSubmit(e){
+      e.preventDefault();
+      if(!document.getElementById('agree').checked){
+        alert('You must confirm consent before submitting.');return false;
+      }
+      statusEl.textContent='Submitted (demo only — backend required).';
+      alert('Form submitted locally. Add backend to process uploads.');
+      return false;
+    }
+  </script>
+</body>
+</html>
