@@ -167,3 +167,308 @@
   </script>
 </body>
 </html>
+<!-- Use fetch to call your backend to create a checkout session -->
+<button id="buyMonthly">Buy Monthly</button>
+<script>
+  document.getElementById('buyMonthly').addEventListener('click', async () => {
+    const resp = await fetch('/create-checkout-session', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ priceId: 'price_XXXX_MONTHLY', customerEmail: 'customer@example.com' })
+    });
+    const data = await resp.json();
+    // redirect to Stripe Checkout
+    window.location = data.url;
+  });
+</script>
+<form id="uploadForm">
+  <input type="email" id="email" placeholder="Your email" required />
+  <input type="file" id="file" accept="audio/*" required />
+  <label>
+    <input type="checkbox" id="consent" required />
+    I confirm I own or have permission to use this voice sample.
+  </label>
+  <button type="submit">Upload & Generate Demo</button>
+</form>
+
+<script>
+document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const file = document.getElementById('file').files[0];
+  const email = document.getElementById('email').value;
+  if (!file) return alert('Choose a file');
+  // 1) get presigned url from backend
+  const presignedResp = await fetch('/generate-presigned', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ filename: file.name, contentType: file.type })
+  });
+  const { uploadUrl, key } = await presignedResp.json();
+  // 2) PUT the file to S3
+  await fetch(uploadUrl, { method: 'PUT', body: file, headers: {'Content-Type': file.type} });
+  // 3) tell backend to create a job (include consent, key, and email)
+  await fetch('/create-voice-job', {
+    method: 'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ key, email, consent: true })
+  });
+  alert('File uploaded. Generating demo — you will be notified when ready.');
+});
+</script>
+<!-- START: Upload + Consent Block -->
+<section id="upload-voice" style="max-width:800px;margin:2rem auto;padding:1.5rem;border-radius:12px;box-shadow:0 6px 24px rgba(0,0,0,0.08);">
+  <h2 style="margin-bottom:.25rem">Upload a short voice sample</h2>
+  <p style="margin-top:0;color:#555">Upload a short recording (5–60s). We'll create a demo of the AI-cloned voice and notify you when it's ready.</p>
+
+  <form id="uploadForm" style="display:grid;gap:.6rem;margin-top:1rem">
+    <input id="email" type="email" placeholder="Your email" required style="padding:.6rem;border-radius:6px;border:1px solid #ddd">
+    <input id="file" type="file" accept="audio/*" required style="padding:.4rem">
+    <label style="font-size:.9rem;color:#333">
+      <input id="consent" type="checkbox" required>
+      <span style="margin-left:.5rem">I confirm I own this voice recording or have explicit permission to use it. I agree to the <a href="/terms" target="_blank">Terms</a>.</span>
+    </label>
+
+    <button id="uploadBtn" type="submit" style="background:#0b76ff;color:white;padding:.6rem;border-radius:8px;border:0;cursor:pointer">Upload & Generate Demo</button>
+
+    <div id="uploadStatus" aria-live="polite" style="font-size:.9rem;color:#333"></div>
+  </form>
+</section>
+
+<script>
+  // Frontend JS for the upload flow
+  document.getElementById('uploadForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fileEl = document.getElementById('file');
+    const email = document.getElementById('email').value.trim();
+    const consent = document.getElementById('consent').checked;
+    const status = document.getElementById('uploadStatus');
+    if (!fileEl.files[0]) return alert('Please select a file.');
+    if (!consent) return alert('You must confirm consent.');
+
+    const file = fileEl.files[0];
+    // Basic client-side validation
+    if (!file.type.startsWith('audio/')) return alert('Please upload an audio file (mp3, wav).');
+    if (file.size > 50 * 1024 * 1024) return alert('File too large (max 50MB).');
+
+    try {
+      status.textContent = 'Requesting upload URL...';
+      const presignedResp = await fetch('/generate-presigned', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ filename: file.name, contentType: file.type })
+      });
+      if (!presignedResp.ok) throw new Error('Failed to get upload URL.');
+      const { uploadUrl, key } = await presignedResp.json();
+
+      status.textContent = 'Uploading file...';
+      const putResp = await fetch(uploadUrl, { method: 'PUT', body: file, headers: { 'Content-Type': file.type }});
+      if (!putResp.ok) throw new Error('Upload failed.');
+
+      status.textContent = 'Registering job...';
+      const jobResp = await fetch('/create-voice-job', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ email, key, consent: true, originalFilename: file.name })
+      });
+      if (!jobResp.ok) throw new Error('Failed to create job.');
+
+      status.innerHTML = 'File uploaded. Demo is being generated — you will receive an email when it is ready.';
+      // Optionally clear form
+      document.getElementById('uploadForm').reset();
+    } catch (err) {
+      console.error(err);
+      status.textContent = 'Error: ' + (err.message || 'Something went wrong.');
+    }
+  });
+</script>
+<!-- END: Upload + Consent Block -->
+// server.js
+require('dotenv').config();
+const express = require('express');
+const bodyParser = require('body-parser');
+const AWS = require('aws-sdk');
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
+const { v4: uuidv4 } = require('uuid');
+
+const app = express();
+app.use(express.json());
+
+// configure S3
+const s3 = new AWS.S3({
+  accessKeyId: process.env.AWS_KEY,
+  secretAccessKey: process.env.AWS_SECRET,
+  region: process.env.AWS_REGION,
+});
+
+// -- 1) presigned upload URL --
+app.post('/generate-presigned', async (req, res) => {
+  try {
+    const { filename, contentType } = req.body;
+    if (!filename || !contentType) return res.status(400).json({ error: 'Missing fields' });
+    const key = `uploads/${Date.now()}_${Math.random().toString(36).slice(2,10)}_${filename.replace(/\s+/g,'_')}`;
+    const params = {
+      Bucket: process.env.S3_BUCKET,
+      Key: key,
+      Expires: 120, // seconds
+      ContentType: contentType,
+      ACL: 'private',
+    };
+    const uploadUrl = await s3.getSignedUrlPromise('putObject', params);
+    res.json({ uploadUrl, key });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not generate presigned url' });
+  }
+});
+
+// -- 2) create voice job (register job, store consent) --
+app.post('/create-voice-job', async (req, res) => {
+  try {
+    const { email, key, consent, originalFilename } = req.body;
+    if (!email || !key || consent !== true) return res.status(400).json({ error: 'Invalid request' });
+
+    // TODO: Save to DB (users/jobs table) including: email, s3_key, consent_text, ip, timestamp
+    // Example stub:
+    const jobId = uuidv4();
+    const job = {
+      id: jobId,
+      email,
+      s3Key: key,
+      originalFilename,
+      consent: true,
+      status: 'queued',
+      createdAt: new Date().toISOString(),
+      // store request IP for audit
+      ip: req.ip || req.headers['x-forwarded-for'] || 'unknown',
+    };
+    console.log('New job', job);
+
+    // TODO: push to queue (Redis/Bull, SQS, etc.) -> worker processes voice cloning
+    // For now, just respond success
+    res.json({ ok: true, jobId });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Could not create job' });
+  }
+});
+
+// -- 3) Stripe Checkout session creation for subscription purchases --
+app.post('/create-checkout-session', async (req, res) => {
+  try {
+    const { priceId, customerEmail } = req.body;
+    if (!priceId || !customerEmail) return res.status(400).json({ error: 'Missing fields' });
+
+    const session = await stripe.checkout.sessions.create({
+      mode: 'subscription',
+      payment_method_types: ['card'],
+      line_items: [{ price: priceId, quantity: 1 }],
+      customer_email: customerEmail,
+      success_url: `${process.env.FRONTEND_URL}/success?session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${process.env.FRONTEND_URL}/cancel`,
+    });
+    res.json({ id: session.id, url: session.url });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to create Stripe session' });
+  }
+});
+
+// -- 4) Stripe webhook handler --
+app.post('/webhook', bodyParser.raw({ type: 'application/json' }), async (req, res) => {
+  const sig = req.headers['stripe-signature'];
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error('Webhook signature verification failed.', err.message);
+    return res.status(400).send(`Webhook Error: ${err.message}`);
+  }
+
+  // Handle events
+  switch (event.type) {
+    case 'checkout.session.completed': {
+      const session = event.data.object;
+      console.log('Checkout session completed', session);
+      // TODO: mark user subscription active in DB
+      break;
+    }
+    case 'invoice.payment_failed': {
+      const invoice = event.data.object;
+      console.log('Payment failed for', invoice.customer);
+      // TODO: notify user or throttle access
+      break;
+    }
+    // add other relevant events
+    default:
+      console.log(`Unhandled event type ${event.type}`);
+  }
+  res.json({ received: true });
+});
+
+const PORT = process.env.PORT || 4242;
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
+<button onclick="startCheckout('price_WEEKLY_XXXX')">Subscribe — $4.99 / week</button>
+
+<script>
+async function startCheckout(priceId){
+  const email = prompt('Enter your email for the subscription:');
+  if(!email) return;
+  const res = await fetch('/create-checkout-session', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ priceId, customerEmail: email })
+  });
+  const data = await res.json();
+  if (data.url) window.location = data.url;
+  else alert('Failed to start checkout.');
+}
+</script>
+<!-- START PRICING TABLE -->
+<section style="max-width:980px;margin:2rem auto;padding:1rem">
+  <h2 style="text-align:center">Plans</h2>
+  <p style="text-align:center;color:#666">Free demo → then choose Weekly, Monthly, or Yearly (best value)</p>
+
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-top:1rem">
+    <!-- Weekly -->
+    <div style="border:1px solid #eee;border-radius:12px;padding:1rem;box-shadow:0 6px 20px rgba(11,118,255,0.06)">
+      <h3>Weekly</h3>
+      <div style="font-size:1.5rem;font-weight:700">$4.99 <span style="font-size:.9rem;font-weight:400">/week</span></div>
+      <p>10 messages / week</p>
+      <ul style="color:#444;padding-left:1rem">
+        <li>Demo: 1 free sample</li>
+        <li>Secure Stripe payments</li>
+      </ul>
+      <button style="background:#0b76ff;color:#fff;padding:.6rem;border-radius:8px;border:0;cursor:pointer;margin-top:.5rem" onclick="startCheckout('price_WEEKLY_XXXX')">Choose Weekly</button>
+    </div>
+
+    <!-- Monthly -->
+    <div style="border:1px solid #eee;border-radius:12px;padding:1rem;box-shadow:0 6px 20px rgba(11,118,255,0.06)">
+      <h3>Monthly</h3>
+      <div style="font-size:1.5rem;font-weight:700">$19.99 <span style="font-size:.9rem;font-weight:400">/month</span></div>
+      <p>50 messages / month</p>
+      <ul style="color:#444;padding-left:1rem">
+        <li>Priority queue</li>
+        <li>Downloadable outputs</li>
+      </ul>
+      <button style="background:#0b76ff;color:#fff;padding:.6rem;border-radius:8px;border:0;cursor:pointer;margin-top:.5rem" onclick="startCheckout('price_MONTHLY_XXXX')">Choose Monthly</button>
+    </div>
+
+    <!-- Yearly -->
+    <div style="border:2px solid #0b76ff;border-radius:12px;padding:1rem;background:linear-gradient(180deg,#f9fbff,#fff);box-shadow:0 12px 30px rgba(11,118,255,0.08)">
+      <h3 style="display:flex;align-items:center;justify-content:space-between">Yearly <span style="background:#0b76ff;color:#fff;padding:.2rem .5rem;border-radius:6px;font-size:.8rem">Best value</span></h3>
+      <div style="font-size:1.5rem;font-weight:700">$199.99 <span style="font-size:.9rem;font-weight:400">/year</span></div>
+      <p>Unlimited messages</p>
+      <ul style="color:#444;padding-left:1rem">
+        <li>Fastest turnaround</li>
+        <li>Dedicated account support</li>
+      </ul>
+      <button style="background:#032b59;color:#fff;padding:.6rem;border-radius:8px;border:0;cursor:pointer;margin-top:.5rem" onclick="startCheckout('price_YEARLY_XXXX')">Choose Yearly</button>
+    </div>
+  </div>
+</section>
+<!-- END PRICING TABLE -->
+PORT=4242
+FRONTEND_URL=https://4evervoices.com
+STRIPE_SECRET_KEY=sk_test_XXXXXXXXXXXXXXXX
+STRIPE_WEBHOOK_SECRET=whsec_ySmCWuCiZLf4pBY1TJRzQ8gTXdmXQOIh
+AWS_KEY=AKIA...
+AWS_SECRET=...
+AWS_REGION=us-east-1
+S3_BUCKET=your-bucket-name
